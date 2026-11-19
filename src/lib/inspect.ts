@@ -140,7 +140,25 @@ function pythonBin(): string {
   return existsSync(venv) ? venv : "python3";
 }
 
+/**
+ * On Vercel the Node runtime has no Python, so pages go to the Python function at
+ * /api/parse (api/parse.py), which runs the same parser. Locally Python is spawned.
+ */
+async function runRemoteParser(pages: FetchedPage[]): Promise<ParsedPage[]> {
+  const host = process.env.PARSER_URL ?? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL ?? process.env.VERCEL_URL}`;
+  const base = host.replace(/\/$/, "");
+  const res = await fetch(`${base}/api/parse`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-parser-secret": process.env.PARSER_SECRET ?? "" },
+    body: JSON.stringify(pages.map((p) => ({ url: p.finalUrl, html: p.html }))),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!res.ok) throw new Error(`remote parser HTTP ${res.status}`);
+  return (await res.json()) as ParsedPage[];
+}
+
 function runParser(pages: FetchedPage[]): Promise<ParsedPage[]> {
+  if (process.env.VERCEL && !process.env.PYTHON_BIN) return runRemoteParser(pages);
   return new Promise((resolve, reject) => {
     const script = path.join(process.cwd(), "scripts", "parse_profile.py");
     const child = spawn(pythonBin(), [script], { stdio: ["pipe", "pipe", "pipe"] });

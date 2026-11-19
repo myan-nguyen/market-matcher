@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "api/parse.py": {
+      "includeFiles": "scripts/**",
+      "maxDuration": 30
+    }
+  }
+}
