@@ -10,7 +10,7 @@ type Props = {
 export default function StateSelect({ value, onChange }: Props) {
   return (
     <FormSection title="state"
-      description="enter state description">
+      description="self-explanatory (multi-select coming soon)">
       <SuggestionChips
         chips={[
           {

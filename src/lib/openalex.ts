@@ -1,3 +1,5 @@
+import { TtlCache } from "@/lib/cache";
+import { keyPhrases, keyTerms } from "@/lib/keyphrases";
 import { errMessage, pool } from "@/lib/pool";
 import { stateName } from "@/lib/states";
 import { unknownClaim } from "@/lib/verify";
@@ -37,7 +39,15 @@ const shortId = (id: string) => id.replace("https://openalex.org/", "");
 
 /* ---------- HTTP ---------- */
 
-async function oaFetch<T>(path: string, params: Record<string, string>): Promise<T> {
+const oaCache = new TtlCache<unknown>(30 * 60_000, 300);
+
+/** Identical OpenAlex requests (for example the state institution list) are fetched once and reused. */
+function oaFetch<T>(path: string, params: Record<string, string>): Promise<T> {
+  const key = `${path}?${Object.entries(params).sort().map(([k, v]) => `${k}=${v}`).join("&")}`;
+  return oaCache.memo(key, () => oaFetchOnce<T>(path, params)) as Promise<T>;
+}
+
+async function oaFetchOnce<T>(path: string, params: Record<string, string>): Promise<T> {
   const url = new URL(`${BASE}${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const key = process.env.OPENALEX_API_KEY?.trim();
@@ -143,6 +153,7 @@ export type OpenAlexOutcome = {
   uniqueAuthors: number;
   poolFull: boolean;
   stateOrgNames: string[]; // institutions OpenAlex places in the selected state
+  topics: string[]; // OpenAlex topics used to expand the search
 };
 
 /**
@@ -247,6 +258,34 @@ export async function searchOpenAlex(
     }
   });
 
+  // Topic expansion: OpenAlex tags every paper with a curated topic, so authors who
+  // use a synonym ("exosomes" for "extracellular vesicles") are found by topic even
+  // when their titles never contain the typed words.
+  const topics = await matchTopics(req.query).catch((e) => {
+    errors.push({ source: "openalex:topics", message: errMessage(e) });
+    return [] as OATopic[];
+  });
+  const topicTasks = topics.map((t) => async () => {
+    const filters = ["authorships.institutions.country_code:US", `primary_topic.id:${shortId(t.id)}`];
+    if (requiredInstitutionId) filters.push(`authorships.institutions.id:${requiredInstitutionId}`);
+    else if (regionName) filters.push(`authorships.institutions.geo.region:"${regionName}"`);
+    for (let page = 1; page <= TOPIC_PAGES; page++) {
+      const data = await oaFetch<OAList<OAWork>>("/works", {
+        filter: filters.join(","),
+        sort: "publication_date:desc", // current researchers, not most cited
+        select: "id,doi,display_name,publication_date,authorships",
+        per_page: String(PER_PAGE),
+        page: String(page),
+      });
+      worksScanned += data.results.length;
+      for (const w of data.results) ingest(w, `topic:${t.display_name}`);
+      if (data.results.length < PER_PAGE) return;
+    }
+  });
+  (await pool(topicTasks, CONCURRENCY)).forEach((r, i) => {
+    if (r.status === "rejected") errors.push({ source: `openalex:topic:${topics[i].display_name}`, message: errMessage(r.reason) });
+  });
+
   const now = new Date().toISOString();
   const candidates = [...authors.values()].map((a) => toCandidate(a, req, stateVerifiable, now));
   return {
@@ -256,7 +295,38 @@ export async function searchOpenAlex(
     uniqueAuthors: authors.size,
     poolFull,
     stateOrgNames: [...stateIds.values()],
+    topics: topics.map((t) => t.display_name),
   };
+}
+
+/* ---------- topic matching ---------- */
+
+type OATopic = { id: string; display_name: string; keywords?: string[] };
+const TOPIC_PAGES = 2;
+const MAX_TOPICS = 2;
+
+/**
+ * OpenAlex topics for the query's key phrases, most specific phrase first. A topic is
+ * kept only when its name or keywords share a content word with the query, so a
+ * loose search hit cannot pull in an unrelated field.
+ */
+async function matchTopics(query: string): Promise<OATopic[]> {
+  const phrases = keyPhrases(query).sort((a, b) => b.split(" ").length - a.split(" ").length);
+  const words = new Set(keyTerms(query));
+  const out: OATopic[] = [];
+  for (const p of phrases.slice(0, 3)) {
+    if (out.length >= MAX_TOPICS) break;
+    const data = await oaFetch<OAList<OATopic>>("/topics", { search: p, select: "id,display_name,keywords", per_page: "3" });
+    for (const t of data.results) {
+      const text = `${t.display_name} ${(t.keywords ?? []).join(" ")}`.toLowerCase();
+      const related = [...words].some((w) => text.includes(w.slice(0, Math.max(4, w.length - 2))));
+      if (related && !out.some((x) => x.id === t.id)) {
+        out.push(t);
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 /* ---------- mapping to the shared Candidate contract ---------- */

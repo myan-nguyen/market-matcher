@@ -21,14 +21,29 @@ export const NOT_A_NAME =
  * none of them names a program, unit or page ("Brazil Initiative").
  * Lowercase particles such as "van" or "de" are allowed.
  */
-export function looksLikePerson(name: string): boolean {
+export function looksLikePerson(name: string, fromFreeText = true): boolean {
   const s = name.replace(/\s+/g, " ").trim();
   if (!s || NOT_A_NAME.test(s) || /\d/.test(s)) return false;
   const parts = s.split(" ");
   if (parts.length < 2 || parts.length > 5) return false;
-  // Named-entity recognition: the text must be tagged as a person, not a phrase like "Campus Life".
+  if (!parts.every((t) => /^[\p{L}][\p{L}.'\u2019-]*$/u.test(t)) || !/^[A-Z\u00C0-\u00DE]/.test(parts[0])) return false;
+  // Every word is tagged on its own, in lowercase. A name's words are names or
+  // unknown words (Schwarzkopf, Krishnamurthi); a heading has an ordinary
+  // adjective, verb, plural or acronym ("High Performance Computing",
+  // "Graduate Students Advised", "Cybersecurity BS", "Next Page").
+  const words = parts.filter((p) => !/^[A-Z]\.?$/.test(p)); // middle initials
+  if (words.some((p) => /^[A-Z]{2,}$/.test(p))) return false;
+  const HEADING = /^(?:Adjective|Verb|Adverb|Preposition|Determiner|Conjunction|Pronoun|Plural|Gerund|PastTense)$/;
+  for (const p of words) {
+    if (/[^\x00-\x7F]/.test(p)) continue; // the English tagger has no view on non-ASCII names
+    const tags: string[] = nlp(p.toLowerCase()).terms().json()[0]?.terms[0]?.tags ?? [];
+    if (!tags.includes("Person") && tags.some((t) => HEADING.test(t))) return false;
+  }
+  // Names from author records or person pages are already known to be people.
+  // Names lifted from free text also need a person tag ("Campus Life" is two nouns).
+  if (!fromFreeText) return true;
   if (nlp(s).people().length === 0) return false;
-  return parts.every((t) => /^[\p{L}][\p{L}.'\u2019-]*$/u.test(t)) && /^[A-Z\u00C0-\u00DE]/.test(parts[0]);
+  return true;
 }
 const ORG_WORDS = /universit|college|institute|hospital|school|center|centre|laborator|medical|academy/i;
 const SPLIT_TITLE = /\s+[|\u2013\u2014-]\s+|:\s+/;

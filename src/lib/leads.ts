@@ -1,6 +1,6 @@
 import type { SourceError } from "@/types/search";
 
-export type LeadSource = "exa-people" | "exa-web" | "brave" | "institutional" | "lookup";
+export type LeadSource = "exa-people" | "exa-web" | "brave" | "institutional" | "lookup" | "llm";
 
 /**
  * The one output contract every provider returns. The engine never cares who

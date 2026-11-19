@@ -1,3 +1,4 @@
+import { TtlCache } from "@/lib/cache";
 import { errMessage } from "@/lib/pool";
 import type { Lead, ProviderOutcome } from "@/lib/leads";
 import type { WebQuery } from "@/lib/webQueries";
@@ -9,7 +10,16 @@ export const braveConfigured = () => Boolean(process.env.BRAVE_API_KEY);
 
 type BraveResult = { url: string; title?: string; description?: string };
 
-export async function braveCall(text: string): Promise<BraveResult[]> {
+const braveCache = new TtlCache<BraveResult[]>(10 * 60_000, 200);
+const braveKey = (text: string) => text.trim().toLowerCase();
+const braveCached = (text: string) => braveCache.has(braveKey(text));
+
+/** Repeated queries are served from cache and skip the one-per-second gap. */
+export function braveCall(text: string): Promise<BraveResult[]> {
+  return braveCache.memo(braveKey(text), () => braveCallOnce(text));
+}
+
+async function braveCallOnce(text: string): Promise<BraveResult[]> {
   const url = new URL(ENDPOINT);
   url.searchParams.set("q", text);
   url.searchParams.set("count", "20");
@@ -41,7 +51,7 @@ export async function braveDiscover(queries: WebQuery[]): Promise<ProviderOutcom
   const leads: Lead[] = [];
   const errors: ProviderOutcome["errors"] = [];
   for (let i = 0; i < queries.length; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, GAP_MS));
+    if (i > 0 && !braveCached(queries[i].text)) await new Promise((r) => setTimeout(r, GAP_MS));
     try {
       for (const hit of await braveCall(queries[i].text)) {
         leads.push({

@@ -1,6 +1,7 @@
 import type { QueryPlan, RetrievalQuery, SearchRequest } from "@/types/search";
 import { STAGE_LABELS } from "@/types/search";
 import { stateName } from "@/lib/states";
+import { conciseQuery } from "@/lib/keyphrases";
 
 export const MAX_QUERIES = 12;
 
@@ -19,7 +20,12 @@ export function buildQueryPlan(req: SearchRequest): QueryPlan {
     queries.push({ ...q, id: `q${queries.length + 1}`, stateFilter });
   };
 
-  // Broad discovery: main phrase, cohort, and both together.
+  // Broad discovery: the key phrases first (what papers and profiles actually say),
+  // then the main phrase, cohort, and both together.
+  const concise = conciseQuery(req.query).replace(/"/g, "");
+  if (concise && concise.toLowerCase() !== req.query.toLowerCase()) {
+    add({ kind: "discovery", text: concise, reason: "Key phrases of the main phrase" });
+  }
   add({ kind: "discovery", text: req.query, reason: "Main phrase alone" });
   add({ kind: "discovery", text: req.cohort, reason: "Cohort text alone" });
   add({

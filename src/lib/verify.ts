@@ -4,6 +4,7 @@ import { hostOf, isInstitutionalHost } from "@/lib/leads";
 import { stateName } from "@/lib/states";
 import type {
   Claim,
+  Contact,
   InspectedProfile,
   Organization,
   StageCode,
@@ -24,6 +25,8 @@ export type PersonPage = {
   stageHits: StageHit[];
   states: string[];
   focus: string | null;
+  emails: string[];
+  contactPage: string | null;
 };
 
 export function toPersonPage(p: InspectedPage): PersonPage | null {
@@ -39,7 +42,55 @@ export function toPersonPage(p: InspectedPage): PersonPage | null {
     stageHits: x.stage_hits ?? [],
     states: x.states ?? [],
     focus: x.focus ?? null,
+    emails: x.emails ?? [],
+    contactPage: x.contact_page ?? null,
   };
+}
+
+/**
+ * The first published contact that belongs to this person. An email counts only
+ * if its local part matches the person's name (e.g. "akshayn", "anarayan",
+ * "akshay.narayan"), so a department inbox or a colleague's address on the same
+ * page is not attributed to them. Institutional pages are checked first.
+ */
+/**
+ * Researchers who asked for their contact details to be removed. Comma-separated
+ * emails or full names in CONTACT_OPT_OUT. Their card shows no contact.
+ */
+function optedOut(name: string, email: string | null): boolean {
+  const list = (process.env.CONTACT_OPT_OUT ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return list.includes(name.toLowerCase()) || (email !== null && list.includes(email.toLowerCase()));
+}
+
+export function deriveContact(name: string, pages: PersonPage[]): Contact {
+  const c = findContact(name, pages);
+  return optedOut(name, c.kind === "email" ? c.value : null)
+    ? { kind: "none", value: null, source: null, checkedAt: c.checkedAt }
+    : c;
+}
+
+function findContact(name: string, pages: PersonPage[]): Contact {
+  const parts = name.toLowerCase().normalize("NFD").replace(/[^a-z\s]/g, "").split(/\s+/).filter(Boolean);
+  const first = parts[0] ?? "";
+  const last = parts[parts.length - 1] ?? "";
+  const belongs = (email: string) => {
+    const local = email.split("@")[0].toLowerCase().replace(/[^a-z]/g, "");
+    return (
+      (last.length >= 3 && local.includes(last)) ||
+      (first.length >= 3 && local.includes(first)) ||
+      (first && last && (local === first[0] + last || local === first + last[0]))
+    );
+  };
+  const ordered = [...pages].sort(byInstitutional);
+  for (const p of ordered) {
+    const email = p.emails.find(belongs);
+    if (email) return { kind: "email", value: email, source: p.url, checkedAt: p.retrievedAt };
+  }
+  for (const p of ordered) {
+    if (p.contactPage) return { kind: "page", value: p.contactPage, source: p.url, checkedAt: p.retrievedAt };
+  }
+  const latest = ordered.map((p) => p.retrievedAt).sort().pop() ?? null;
+  return { kind: "none", value: null, source: null, checkedAt: latest };
 }
 
 export function toProfile(p: PersonPage): InspectedProfile {
@@ -57,27 +108,33 @@ const byInstitutional = (a: PersonPage, b: PersonPage) =>
 
 /* ---------- career stage ---------- */
 
-// "PhD candidate" implies the candidate stage. "PhD student" does not say how
-// far along someone is, so it is never mapped to a stage.
+// Simple categories: faculty, PhD, postdoc. Any PhD student or candidate is "PhD"
+// (stored as advanced-phd, labeled "PhD"); how far along is not guessed.
 const STAGE_OF: Record<StageHit["kind"], StageCode | null> = {
   postdoc: "postdoc",
   "phd-candidate": "advanced-phd",
-  "phd-student": null,
+  "phd-student": "advanced-phd",
   faculty: "faculty",
 };
 
 type StageRead = { page: PersonPage; values: StageCode[]; strong: boolean };
 
+/** Where the stage words were found decides how much they count: header over opening body text. */
 function readStage(page: PersonPage): StageRead | null {
-  // Only header words count. Body prose may describe an advisor or collaborator.
   const header = page.stageHits.filter((h) => h.where !== "body");
-  if (header.length === 0) return null;
+  // The opening of a personal page ("I am a fifth-year PhD student…") states the
+  // person's own role; it is used when the header names none, as a weaker read.
+  const hits = header.length ? header : page.stageHits.filter((h) => h.where === "body").slice(0, 1);
+  if (hits.length === 0) return null;
   const values: StageCode[] = [];
-  for (const h of header) {
+  for (const h of hits) {
     const v = STAGE_OF[h.kind];
     if (v && !values.includes(v)) values.push(v);
   }
-  return { page, values, strong: true };
+  // Several roles in one header ("Professor … advises PhD students"): the senior role wins.
+  const order: StageCode[] = ["faculty", "postdoc", "advanced-phd", "early-phd"];
+  values.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  return { page, values: values.slice(0, 1), strong: header.length > 0 };
 }
 
 export function deriveStage(pages: PersonPage[]): Claim<StageCode> {

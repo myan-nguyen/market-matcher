@@ -1,4 +1,5 @@
 import type { Facets } from "@/types/search";
+import { conciseQuery } from "@/lib/keyphrases";
 
 export type WebQuery = { id: string; text: string; branch: string };
 
@@ -17,15 +18,27 @@ const clean = (s: string) => s.replace(/\s+/g, " ").trim();
  * has to verify them later. Nothing here is specific to one institution.
  */
 export function webQueryTexts(f: Facets, stateLabel: string | null): { people: WebQuery[]; web: WebQuery[] } {
+  // Search engines match a few strong phrases better than a full sentence.
+  f = { ...f, topic: conciseQuery(f.topic) };
   const inst = f.institution?.name ?? "";
   const place = f.institution ? "" : (stateLabel ?? "");
   const related = f.related[0] ?? "";
   const stage = f.stages.length === 1 ? STAGE_WORDS[f.stages[0]] : "";
   const sites = (f.institution?.domains ?? []).map((d) => `site:${d}`).join(" OR ");
+  // PhD students rarely have faculty-style profiles: they appear on lab member pages
+  // and personal homepages ("I am a PhD student in…"). Search those first when asked.
+  const wantsPhd = f.stages.some((s) => s === "advanced-phd" || s === "early-phd");
+  const phdRaw: Array<[string, string]> = wantsPhd
+    ? [
+        ["phd+personal", `"PhD student" ${f.topic} ${inst} ${place} homepage`],
+        ["phd+lab", `${f.topic} lab members graduate students ${inst} ${place}`],
+      ]
+    : [];
 
   const raw: Array<[string, string]> = [
+    ...phdRaw,
     ["topic+institution", `${f.topic} ${inst} ${place}`],
-    ["topic+faculty", `${f.topic} faculty researcher ${inst} ${stage}`],
+    ["topic+faculty", `${f.topic} ${wantsPhd ? "" : "faculty researcher"} ${inst} ${stage}`],
     ["topic+related", related ? `${f.topic} ${related} ${inst}` : ""],
     ["directory", inst ? `${inst} department research areas ${f.topic} people` : `${f.topic} research group people directory`],
     ["site", sites ? `${f.topic} (people OR faculty OR lab OR students) ${sites}` : ""],

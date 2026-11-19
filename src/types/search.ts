@@ -4,10 +4,12 @@ export const MAX_RESULTS = 50;
 
 export const STAGE_CODES = ["postdoc", "advanced-phd", "early-phd", "faculty"] as const;
 export type StageCode = (typeof STAGE_CODES)[number];
+/** Stages offered in the form and filters: faculty, PhD, postdoc. */
+export const SHOWN_STAGES: StageCode[] = ["faculty", "advanced-phd", "postdoc"];
 
 export const STAGE_LABELS: Record<StageCode, string> = {
   postdoc: "Postdoc",
-  "advanced-phd": "Advanced PhD",
+  "advanced-phd": "PhD",
   "early-phd": "Early PhD",
   faculty: "Faculty",
 };
@@ -83,6 +85,15 @@ export type InspectedProfile = {
 /** Text that describes a person's work, read from a page or a search result. */
 export type Excerpt = { url: string; text: string; provisional?: boolean };
 
+/**
+ * A contact detail published on one of the person's own profile pages. Never
+ * generated from an email pattern. kind "none" means no page published one.
+ */
+export type Contact =
+  | { kind: "email"; value: string; source: string; checkedAt: string }
+  | { kind: "page"; value: string; source: string; checkedAt: string }
+  | { kind: "none"; value: null; source: null; checkedAt: string | null };
+
 export type Candidate = {
   id: string; // stable across searches
   orcid: string | null; // bare ORCID iD, used to merge records
@@ -103,6 +114,7 @@ export type Candidate = {
   excerpts?: Excerpt[]; // direct text from profile pages or search results, with its URL
   score: number; // 0-100 after scoring; the sum of scoreBreakdown
   scoreBreakdown?: ScoreComponent[]; // set by scorePeople
+  contact?: Contact; // published contact from the person's own pages
 };
 
 /** One part of the 100-point rubric, with the URLs that earned it. */

@@ -1,15 +1,16 @@
+import { Bookmark } from "lucide-react";
 import type { ResultFilters } from "@/types/search";
-import { STAGE_CODES, STAGE_LABELS } from "@/types/search";
+import { SHOWN_STAGES, STAGE_LABELS } from "@/types/search";
 
 type Props = {
   filters: ResultFilters;
   institutions: string[];
   shown: number;
   total: number;
-  constrained: boolean;
-  verifiedCount: number;
-  checkingCount: number;
   onChange: (next: Partial<ResultFilters>) => void;
+  bookmarkCount: number;
+  showBookmarks: boolean;
+  onToggleBookmarks: () => void;
 };
 
 export default function ResultControls({
@@ -17,55 +18,28 @@ export default function ResultControls({
   institutions,
   shown,
   total,
-  constrained,
-  verifiedCount,
-  checkingCount,
   onChange,
+  bookmarkCount,
+  showBookmarks,
+  onToggleBookmarks,
 }: Props) {
   return (
     <div className="result-controls">
+      <button
+        type="button"
+        className={showBookmarks ? "bookmark-toggle bookmark-toggle-on" : "bookmark-toggle"}
+        onClick={onToggleBookmarks}
+        aria-pressed={showBookmarks}
+      >
+        <Bookmark size={16} fill={showBookmarks ? "currentColor" : "none"} />
+        {showBookmarks ? "Back to search results" : "Bookmarked"} ({bookmarkCount})
+      </button>
+
       <p className="controls-kicker">
         other filters
       </p>
 
-      {constrained && (
-        <div className="group-tabs" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={filters.group === "verified"}
-            className={filters.group === "verified" ? "tab tab-on" : "tab"}
-            onClick={() => onChange({ group: "verified" })}
-          >
-            Verified matches ({verifiedCount})
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={filters.group === "needs-checking"}
-            className={filters.group === "needs-checking" ? "tab tab-on" : "tab"}
-            onClick={() => onChange({ group: "needs-checking" })}
-          >
-            Needs checking ({checkingCount})
-          </button>
-        </div>
-      )}
-
       <div className="controls-row">
-        <label className="control">
-          Stage / location status
-          <select
-            value={filters.stageStatus}
-            onChange={(e) =>
-              onChange({ stageStatus: e.target.value as ResultFilters["stageStatus"] })
-            }
-          >
-            <option value="all">All</option>
-            <option value="verified">Verified</option>
-            <option value="inferred">Inferred</option>
-            <option value="unknown">Unknown</option>
-          </select>
-        </label>
         <label className="control">
           Career stage
           <select
@@ -73,7 +47,7 @@ export default function ResultControls({
             onChange={(e) => onChange({ stage: e.target.value as ResultFilters["stage"] })}
           >
             <option value="all">All</option>
-            {STAGE_CODES.map((s) => (
+            {SHOWN_STAGES.map((s) => (
               <option key={s} value={s}>
                 {STAGE_LABELS[s]}
               </option>
@@ -93,34 +67,6 @@ export default function ResultControls({
                 {i}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="control">
-          Evidence type
-          <select
-            value={filters.evidenceType}
-            onChange={(e) =>
-              onChange({ evidenceType: e.target.value as ResultFilters["evidenceType"] })
-            }
-          >
-            <option value="all">All</option>
-            <option value="profile">Profile</option>
-            <option value="publication">Publication</option>
-            <option value="project">Project</option>
-          </select>
-        </label>
-        <label className="control">
-          Opportunity
-          <select
-            value={filters.opportunity}
-            onChange={(e) =>
-              onChange({ opportunity: e.target.value as ResultFilters["opportunity"] })
-            }
-          >
-            <option value="all">All</option>
-            <option value="checked">Checked</option>
-            <option value="unresolved">Unresolved</option>
-            <option value="not checked">Not checked</option>
           </select>
         </label>
         <label className="control">

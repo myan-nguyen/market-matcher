@@ -28,6 +28,9 @@ STAGE_PATTERNS = [
     ),
 ]
 
+PAST_ROLE = re.compile(r"\b(?:former|formerly|previously|was\s+an?|alumn\w*|advis\w*|supervis\w*|mentor\w*|with)\W+(?:\w+\W+){0,2}$", re.I)
+SELF_ROLE = re.compile(r"\b(?:I\s+am|I'm|is|am\s+currently|currently)\s+(?:an?\s+)?(?:[\w-]+\s+){0,3}$", re.I)
+
 JOB_WORDS = re.compile(
     r"professor|researcher|scientist|fellow|student|candidate|postdoc|investigator|lecturer",
     re.I,
@@ -45,11 +48,67 @@ AFFILIATION_RE = re.compile(
     r"((?:the\s+)?(?:University of [A-Z][\w&'-]+(?: [A-Z][\w&'-]+)*|[A-Z][\w&'-]+(?: [A-Z][\w&'-]+)*"
     r" (?:University|College|Institute|Laboratory)))"
 )
-SPLIT_TITLE = re.compile(r"\s+[|\u2013\u2014-]\s+")
+SPLIT_TITLE = re.compile(r"\s+(?:[|\u2013\u2014-]|::|\u00bb|\u00b7)\s+")
 LEADING_TITLE = re.compile(r"^(?:dr|prof|professor)\.?\s+", re.I)
 TRAILING_DEGREE = re.compile(
     r",?\s*(?:ph\.?d\.?|m\.?d\.?|m\.?s\.?c?\.?|m\.?p\.?h\.?|d\.?phil\.?)\b.*$", re.I
 )
+
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Obfuscated forms people publish on purpose: "name [at] brown [dot] edu".
+OBFUSCATED_RE = re.compile(
+    r"([A-Za-z0-9._%+-]+)\s*(?:\[at\]|\(at\)|\s+at\s+)\s*([A-Za-z0-9-]+(?:\s*(?:\[dot\]|\(dot\)|\s+dot\s+|\.)\s*[A-Za-z0-9-]+)+)",
+    re.I,
+)
+CONTACT_TEXT = re.compile(r"^\s*contact(?: me| us| info(?:rmation)?)?\s*$", re.I)
+
+
+def cf_decode(hexstr):
+    """Cloudflare email protection: the page publishes the address XOR-encoded for browsers to decode."""
+    try:
+        key = int(hexstr[:2], 16)
+        return "".join(chr(int(hexstr[i:i + 2], 16) ^ key) for i in range(2, len(hexstr), 2))
+    except ValueError:
+        return ""
+
+
+def contacts(soup, base_url):
+    """Contact details the page itself publishes. Nothing is guessed."""
+    emails = []
+    for tag in soup.find_all(attrs={"data-cfemail": True}):
+        addr = cf_decode(tag["data-cfemail"])
+        if EMAIL_RE.fullmatch(addr) and addr not in emails:
+            emails.append(addr)
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if "/cdn-cgi/l/email-protection#" in href:
+            addr = cf_decode(href.split("#", 1)[1])
+            if EMAIL_RE.fullmatch(addr) and addr not in emails:
+                emails.append(addr)
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if href.lower().startswith("mailto:"):
+            addr = href[7:].split("?")[0].strip()
+            if EMAIL_RE.fullmatch(addr) and addr not in emails:
+                emails.append(addr)
+    text = soup.get_text(" ")
+    for m in EMAIL_RE.finditer(text):
+        if m.group(0) not in emails:
+            emails.append(m.group(0))
+    for m in OBFUSCATED_RE.finditer(text):
+        domain = re.sub(r"\s*(?:\[dot\]|\(dot\)|\s+dot\s+|\.)\s*", ".", m.group(2), flags=re.I)
+        addr = f"{m.group(1)}@{domain}"
+        if EMAIL_RE.fullmatch(addr) and addr not in emails:
+            emails.append(addr)
+    page = None
+    for a in soup.find_all("a", href=True):
+        if CONTACT_TEXT.match(squash(a.get_text(" "))):
+            u = urljoin(base_url, a["href"].strip())
+            if u.startswith("http"):
+                page = u
+                break
+    return {"emails": emails[:5], "contact_page": page}
 
 
 def squash(text):
@@ -191,6 +250,7 @@ def collect_links(main, base_url):
 
 def parse(url, html):
     soup = BeautifulSoup(html, "html.parser")
+    contact = contacts(soup, url)  # read before nav/header are stripped
     people = person_ld(soup)
     ld = people[0] if people else {}
 
@@ -199,12 +259,17 @@ def parse(url, html):
     title_tag = squash(soup.title.get_text(" ")) if soup.title else ""
     og_title = squash(meta_title.get("content")) if meta_title else ""
 
+    # The page's own h1 often sits inside <header>; read it before stripping chrome.
+    first_h1 = soup.find("h1")
+    page_h1 = squash(first_h1.get_text(" ")) if first_h1 else ""
     for tag in soup(["script", "style", "noscript", "svg", "nav", "header"]):
         tag.decompose()
     main = soup.find("main") or soup.body or soup
     body_text = squash(main.get_text(" "))
     h1 = main.find("h1")
     h1_text = squash(h1.get_text(" ")) if h1 else ""
+    if not clean_name(h1_text) and clean_name(page_h1):
+        h1_text = page_h1
 
     # Name: structured data first, then the page heading, then the title.
     name, name_source = None, None
@@ -257,15 +322,32 @@ def parse(url, html):
         ("jobTitle", job_text),
         ("h1", h1_text),
         ("title", f"{title_tag} {og_title}"),
-        ("body", body_text[:500]),
+        ("body", body_text[:1500]),
     ]
     header = " ".join(text for _, text in tiers)
+    # One hit per tier: the earliest role phrase is the person's own ("PhD student,
+    # advised by Professor X"). Mentions of former roles are skipped, and body
+    # prose only counts as a self-statement ("I am a fourth-year PhD student").
+    # A role directly after the person's own name is their title line
+    # ("Jane Doe, Assistant Professor of ..."; "Jane Doe PhD Student").
+    def names_self(before):
+        return bool(name) and re.search(re.escape(name) + r"[\s,|\u2013\u2014-]*(?:(?:assistant|associate|full|adjunct|visiting|research|teaching|clinical|senior)\s+)?$", before, re.I)
+
     stage_hits = []
     for where, text in tiers:
+        found = []
         for kind, pattern in STAGE_PATTERNS:
-            m = pattern.search(text)
-            if m:
-                stage_hits.append({"kind": kind, "text": m.group(0), "where": where})
+            for m in pattern.finditer(text):
+                before = text[max(0, m.start() - 80) : m.start()]
+                if PAST_ROLE.search(before):
+                    continue
+                if where == "body" and not SELF_ROLE.search(before) and not names_self(before):
+                    continue
+                found.append((m.start(), kind, m.group(0)))
+                break
+        if found:
+            _, kind, t = min(found)
+            stage_hits.append({"kind": kind, "text": t, "where": where})
 
     states = []
     address = ld.get("address")
@@ -278,14 +360,19 @@ def parse(url, html):
         if code in STATE_CODES and code not in states:
             states.append(code)
 
-    headline = squash(job_text) or h1_text or title_tag
+    # The role phrase that was read as the person's own stage makes a better
+    # headline than a bare name or a section heading like "About".
+    own_role = next((h["text"] for h in stage_hits), "")
+    weak_h1 = not h1_text or h1_text == name or not clean_name(h1_text)
+    headline = squash(job_text) or (f"{own_role[:1].upper()}{own_role[1:]}" if own_role and weak_h1 else "") or h1_text or title_tag
     header_only = " ".join([job_text, h1_text, title_tag, og_title])
     header_stage = any(h["where"] != "body" for h in stage_hits)
     # A heading or structured name plus a role word near the top of the page is
     # enough: many faculty pages keep the title in a subheading, not the <title>.
+    # A page whose title names the person and which states their own role also counts.
     top_role = name_source in ("json-ld", "h1") and bool(JOB_WORDS.search(body_text[:400]))
     is_person = bool(name) and bool(
-        ld or header_stage or JOB_WORDS.search(header_only) or top_role
+        ld or header_stage or JOB_WORDS.search(header_only) or top_role or stage_hits
     )
     links = [] if is_person else collect_links(main, url)
     kind = "person" if is_person else ("directory" if len(links) >= 4 else "other")
@@ -301,6 +388,8 @@ def parse(url, html):
         "states": states[:4],
         "focus": focus_text(soup, main),
         "links": links[:80] if kind == "directory" else [],
+        "emails": contact["emails"] if kind == "person" else [],
+        "contact_page": contact["contact_page"] if kind == "person" else None,
     }
 
 

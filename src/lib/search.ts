@@ -118,7 +118,7 @@ export async function runSearch(req: SearchRequest): Promise<SearchResponse> {
   const scored = scorePeople(verified, req, plan, facets);
 
   // 5. selectTop50: fewer than 50 when the rest are weak.
-  const { selected, capped } = selectTop50(scored);
+  const { selected, capped } = selectTop50(scored, req);
 
   // Per-source counts after verification and selection.
   const count = (list: Candidate[], src: string) => list.filter((c) => c.foundBy.includes(src)).length;

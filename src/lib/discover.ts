@@ -17,6 +17,7 @@ import { exaConfigured, exaDiscover, exaSearch } from "@/lib/providers/exa";
 import { share, specificTopic, terms as termsOf } from "@/lib/rank";
 import { stateName } from "@/lib/states";
 import {
+  deriveContact,
   deriveFocus,
   deriveLocation,
   deriveOrgs,
@@ -28,7 +29,8 @@ import {
   type PersonPage,
 } from "@/lib/verify";
 import { webQueryTexts, institutionalQueries, type WebQuery } from "@/lib/webQueries";
-import { broadQueries, FIRST_PASS_SITE_SEARCHES, EXPANSION_SITE_SEARCHES, THIN_POOL, shortlistOrgs, type OrgCandidate } from "@/lib/orgSelect";
+import { llmQueries } from "@/lib/llmQueries";
+import { broadQueries, registrableDomain, FIRST_PASS_SITE_SEARCHES, EXPANSION_SITE_SEARCHES, THIN_POOL, shortlistOrgs, type OrgCandidate } from "@/lib/orgSelect";
 import {
   MAX_RESULTS,
   type Candidate,
@@ -46,6 +48,7 @@ import {
 const MAX_INSPECT_LEADS = 120; // hard cap on cold pages
 const INSPECT_BATCH = 20;
 const INSPECT_TIME_MS = 30_000;
+const STATE_SITE_SEARCHES = 12; // one site search per in-state organization, evidence-ordered
 const MAX_DIRECTORY_FOLLOW = 40; // profile and personal-site pages followed from directory pages
 const FOLLOW_PER_DIRECTORY = 12;
 const MAX_AUTHOR_LOOKUPS = 15; // only the most promising people get a per-person lookup
@@ -128,8 +131,31 @@ export async function discoverPeople(
   const webSet = topicLed ? broadQueries(facets.topic) : q.web;
 
   // 1. Every path runs in parallel. None is restricted to one index.
+  //    The LLM only proposes extra search phrasings; its queries run through the
+  //    same providers and every person still has to be found on a real page.
   const target = req.stages.length ? MAX_RESULTS * POOL_PER_RESULT : MAX_RESULTS;
-  const [oa, exaPeople, exaWeb, brave] = await Promise.all([
+  const llmRun = llmQueries(facets, stateName(req.state)).then(async (r) => {
+    if (r.error) errors.push({ source: "anthropic", message: r.error });
+    if (!r.queries.length) return { leads: [] as Lead[], errors: [] as SourceError[], n: 0, people: [] as string[], own: [] as Lead[] };
+    // Named people: one small web search each (their own page is usually the top hit).
+    // Topic phrasings: Brave, which handles lab/department pages well. One call per query.
+    const persons = r.queries.filter((x) => x.branch === "llm-person");
+    const topics = r.queries.filter((x) => x.branch !== "llm-person");
+    const [a, b] = await Promise.all([exaDiscover(persons, false), braveConfigured() ? braveDiscover(topics) : exaDiscover(topics, false)]);
+    // For each named person, the top institutional hits that carry their surname:
+    // these are read before the general queue, so the cap cannot cut them.
+    const own: Lead[] = [];
+    for (const name of r.people ?? []) {
+      const last = name.split(" ").pop()!.toLowerCase();
+      own.push(
+        ...a.leads
+          .filter((l) => `${l.url} ${l.title ?? ""}`.toLowerCase().includes(last) && isInstitutionalHost(hostOf(l.url)))
+          .slice(0, 2),
+      );
+    }
+    return { leads: [...a.leads, ...b.leads], errors: [...a.errors, ...b.errors], n: r.queries.length, people: r.people ?? [], own };
+  });
+  const [oa, exaPeople, exaWeb, brave, llm] = await Promise.all([
     searchOpenAlex(req, plan, target, institution?.openalexId ?? null).catch((e) => {
       errors.push({ source: "openalex", message: errMessage(e) });
       return null;
@@ -137,8 +163,13 @@ export async function discoverPeople(
     exaDiscover(q.people, true),
     exaDiscover(webSet.slice(0, 4), false),
     braveDiscover(webSet),
+    llmRun,
   ]);
-  for (const out of [exaPeople, exaWeb, brave]) errors.push(...out.errors);
+  for (const out of [exaPeople, exaWeb, brave, llm]) errors.push(...out.errors);
+  if (llm.n) notes.push(`LLM widening: ${llm.n} extra queries, ${llm.leads.length} leads.`);
+  // LLM leads keep their own source so they get their own inspection queue
+  // (and are read first), instead of queuing behind exa-web's long list.
+  const llmLeads = llm.leads.map((l): Lead => ({ ...l, source: "llm" }));
   if (oa) errors.push(...oa.errors);
 
   const skipped = [!exaConfigured() && "Exa", !braveConfigured() && "Brave"].filter(Boolean);
@@ -154,7 +185,20 @@ export async function discoverPeople(
   if (institution) {
     instSeedDomains = institution.domains;
   } else if (req.state) {
-    instSeedDomains = scoped.filter((o) => o.type === "university" && o.state === req.state).flatMap((o) => o.domains).slice(0, 4);
+    // People first: the broad searches and OpenAlex already ran. Every organization in
+    // the state (universities, institutes, hospitals) is then ordered by how many of
+    // those people show topic evidence there, and site-searched in that order. Ones
+    // with no evidence yet still get a search, after the evidenced ones, up to the cap.
+    const inState = scoped.filter((o) => o.state === req.state && o.domains.length > 0);
+    const evidence = await shortlistOrgs(facets, [...exaPeople.leads, ...exaWeb.leads, ...brave.leads], oa?.candidates ?? []);
+    const scoreOf = new Map(evidence.map((o) => [o.domain, o.score]));
+    const rankOf = (o: OrgRecord) => Math.max(0, ...o.domains.map((d) => scoreOf.get(registrableDomain(d)) ?? 0));
+    const ordered = [...inState].sort((a, b) => rankOf(b) - rankOf(a) || (a.type === "university" ? -1 : 1));
+    instSeedDomains = ordered.slice(0, STATE_SITE_SEARCHES).map((o) => o.domains[0]);
+    const withEvidence = ordered.filter((o) => rankOf(o) > 0).length;
+    notes.push(
+      `${stateName(req.state)}: ${inState.length} organizations known; site-searched ${instSeedDomains.length} (${withEvidence} with topic evidence first).`,
+    );
   } else {
     // Topic-led: choose organizations from what the broad searches and OpenAlex surfaced.
     shortlist = await shortlistOrgs(facets, [...exaPeople.leads, ...exaWeb.leads, ...brave.leads], oa?.candidates ?? []);
@@ -165,7 +209,11 @@ export async function discoverPeople(
         : "Topic-led discovery found no organization with specific topic evidence, so no site search ran.",
     );
   }
-  const instQueries = institutionalQueries(facets, instSeedDomains, topicLed ? { perDomain: 1, max: FIRST_PASS_SITE_SEARCHES } : {});
+  const instQueries = institutionalQueries(
+    facets,
+    instSeedDomains,
+    topicLed ? { perDomain: 1, max: FIRST_PASS_SITE_SEARCHES } : !institution && req.state ? { perDomain: 1, max: STATE_SITE_SEARCHES } : {},
+  );
   // One site search per domain: Brave when configured (it supports site:), else Exa.
   const siteSearch = (qs: WebQuery[]) => (braveConfigured() ? braveDiscover(qs) : exaDiscover(qs, false));
   const [instExa, instBrave] = topicLed
@@ -183,7 +231,7 @@ export async function discoverPeople(
   }
   type Merged = Lead & { sources: Set<string>; queries: Set<string> };
   const byUrl = new Map<string, Merged>();
-  for (const lead of [...exaPeople.leads, ...exaWeb.leads, ...brave.leads, ...institutional]) {
+  for (const lead of [...llmLeads, ...exaPeople.leads, ...exaWeb.leads, ...brave.leads, ...institutional]) {
     const host = hostOf(lead.url);
     if (!isSafePublicUrl(lead.url) || isNoiseHost(host)) continue;
     const key = normalizeUrl(lead.url);
@@ -198,6 +246,7 @@ export async function discoverPeople(
   // The named institution's own pages, institutional hosts, and pages found by several paths come first.
   const ranked = [...byUrl.values()].sort(
     (a, b) =>
+      Number(b.sources.has("llm")) - Number(a.sources.has("llm")) ||
       Number(onInstitution(b.url)) - Number(onInstitution(a.url)) ||
       Number(isInstitutionalHost(hostOf(b.url))) - Number(isInstitutionalHost(hostOf(a.url))) ||
       b.sources.size - a.sources.size,
@@ -241,10 +290,24 @@ export async function discoverPeople(
   const first = { pages: [] as InspectedPage[], failed: 0, parserError: null as string | null, fetchLog: [] as FetchLogEntry[] };
   const deadline = Date.now() + INSPECT_TIME_MS;
   let stopReason = "no more leads";
+  // Pages of people the LLM named are read first and outside the budget (at most ~24).
+  {
+    const ownKeys = [...new Set(llm.own.map((l) => normalizeUrl(l.url)))].filter((k) => byUrl.has(k));
+    const ownLeads = ownKeys.map((k) => byUrl.get(k)!);
+    for (const q of queues.values()) for (let i = q.length - 1; i >= 0; i--) if (ownKeys.includes(normalizeUrl(q[i].url))) q.splice(i, 1);
+    if (ownLeads.length) {
+      for (const l of ownLeads) leadsByKey.set(normalizeUrl(l.url), l);
+      const got = await inspectUrls(ownLeads.map((l) => l.url));
+      first.pages.push(...got.pages);
+      first.fetchLog.push(...got.fetchLog);
+      first.failed += got.failed;
+      first.parserError ??= got.parserError;
+    }
+  }
   while (true) {
-    if (leadsByKey.size >= MAX_INSPECT_LEADS) { stopReason = `page budget (${MAX_INSPECT_LEADS})`; break; }
+    if (leadsByKey.size >= MAX_INSPECT_LEADS + llm.own.length) { stopReason = `page budget (${MAX_INSPECT_LEADS})`; break; }
     if (Date.now() > deadline) { stopReason = `time budget (${INSPECT_TIME_MS / 1000}s)`; break; }
-    const batch = nextBatch(Math.min(INSPECT_BATCH, MAX_INSPECT_LEADS - leadsByKey.size));
+    const batch = nextBatch(Math.min(INSPECT_BATCH, MAX_INSPECT_LEADS + llm.own.length - leadsByKey.size));
     if (batch.length === 0) break;
     for (const l of batch) leadsByKey.set(normalizeUrl(l.url), l);
     const got = await inspectUrls(batch.map((l) => l.url));
@@ -425,6 +488,8 @@ export async function discoverPeople(
         stageHits: [],
         states: [],
         focus: page.parsed.focus ?? null,
+        emails: page.parsed.emails ?? [],
+        contactPage: page.parsed.contact_page ?? null,
       },
       key,
     );
@@ -449,7 +514,7 @@ export async function discoverPeople(
   }
 
   // 5. Publication authors have no profile yet. Look up a current page for the most
-  //    promising ones only; lookups share the provider queue and are deduplicated.
+  //    active ones.
   const needLookup = people
     .filter((p) => p.author && p.pages.length === 0)
     .sort((a, b) => (b.author?.score ?? 0) - (a.author?.score ?? 0))
@@ -535,6 +600,30 @@ export async function discoverPeople(
   ];
   const stateOrgNames = oa?.stateOrgNames ?? [];
   const candidates = people.map((p) => buildCandidate(p, req, stateOrgNames));
+  // A profile hosted on an in-state organization's own domain (cs.brown.edu for Brown)
+  // places the person there when no page printed an address. Only that state's org
+  // domains count, so nothing from another state can be pulled in.
+  if (req.state) {
+    const inStateDomains = orgs.filter((o) => o.state === req.state).flatMap((o) => o.domains.map(registrableDomain));
+    for (const c of candidates) {
+      if (c.location.value) continue;
+      const hit = c.profiles.find((p) => !p.provisional && p.institutional && inStateDomains.includes(registrableDomain(hostOf(p.url))));
+      if (hit) {
+        c.location = {
+          value: req.state,
+          status: "inferred",
+          source: hit.url,
+          retrievedAt: hit.retrievedAt,
+          note: `Profile is on the website of an organization in ${stateName(req.state)}.`,
+        };
+      }
+    }
+  }
+  // People the LLM recalled by name, then found on a real page: an expert-recall signal.
+  for (const c of candidates) {
+    if (c.profiles.some((p) => !p.provisional) && llm.people.some((n) => sameName(n, c.name))) c.foundBy.push("llm-named");
+  }
+  if (llm.people.length) notes.push(`LLM named ${llm.people.length} people; ${candidates.filter((c) => c.foundBy.includes("llm-named")).length} confirmed on a page.`);
 
   // 7. Per-path yield at each stage, so providers can be compared on real queries.
   const surfaced = (src: string) => candidates.filter((c) => c.foundBy.includes(src)).length;
@@ -563,11 +652,13 @@ export async function discoverPeople(
     stat("exa-people", exaPeople.leads.length),
     stat("exa-web", exaWeb.leads.length),
     stat("brave", brave.leads.length),
+    stat("llm", llmLeads.length),
     stat("institutional", institutional.length),
     stat("directory", followMeta.size),
   ];
 
   if (oa) notes.push(`OpenAlex: scanned ${oa.worksScanned} works, ${oa.uniqueAuthors} unique authors.`);
+  if (oa?.topics.length) notes.push(`OpenAlex topic expansion: ${oa.topics.join("; ")}.`);
   notes.push(
     `Inspected ${first.pages.length + second.pages.length} pages; ${candidates.filter((c) => c.profiles.some((p) => !p.provisional)).length} people have a readable profile, ${candidates.filter((c) => c.profiles.length > 0 && c.profiles.every((p) => p.provisional)).length} are provisional.`,
   );
@@ -646,6 +737,7 @@ function buildCandidate(p: Person, req: SearchRequest, stateOrgNames: string[]):
     foundBy: [...p.foundBy],
     excerpts,
     score: 0, // set by scorePeople
+    contact: deriveContact(base?.name ?? p.name, pages),
   };
   candidate.unresolvedQuestions = openQuestions({
     stage,

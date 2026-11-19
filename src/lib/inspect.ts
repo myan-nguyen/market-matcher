@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { hostOf, isSafePublicUrl } from "@/lib/leads";
+import { hostOf, isSafePublicUrl, normalizeUrl } from "@/lib/leads";
 import { pool } from "@/lib/pool";
 
 const USER_AGENT = "MarketMatcher/0.1 (research outreach tool; reads selected public profile pages)";
@@ -28,6 +28,8 @@ export type ParsedPage = {
   states?: string[];
   focus?: string | null;
   links?: DirectoryLink[]; // individual profile links, set for directory pages
+  emails?: string[]; // published on the page (mailto: or visible text), never guessed
+  contact_page?: string | null;
   error?: string;
 };
 
@@ -79,22 +81,55 @@ async function robotsAllows(u: URL): Promise<boolean> {
 
 /* ---------- fetching ---------- */
 
-export async function fetchPage(url: string): Promise<FetchedPage> {
+// Public pages are reused across searches. A fresh copy is served as-is; a stale one is
+// revalidated with If-None-Match / If-Modified-Since, so an unchanged page costs no download.
+const PAGE_FRESH_MS = 15 * 60_000;
+const PAGE_MAX = 150;
+type CachedPage = { at: number; etag: string | null; lastModified: string | null; page: FetchedPage };
+const pageCache = new Map<string, CachedPage>();
+const pageInflight = new Map<string, Promise<FetchedPage>>();
+
+export function fetchPage(url: string): Promise<FetchedPage> {
+  const key = normalizeUrl(url);
+  const running = pageInflight.get(key);
+  if (running) return running;
+  const p = fetchPageUncached(url, key).finally(() => pageInflight.delete(key));
+  pageInflight.set(key, p);
+  return p;
+}
+
+async function fetchPageUncached(url: string, key: string): Promise<FetchedPage> {
+  const cached = pageCache.get(key);
+  if (cached && Date.now() - cached.at < PAGE_FRESH_MS) return { ...cached.page, url };
   const u = new URL(url);
   if (!(await robotsAllows(u))) throw new Error("blocked by robots.txt");
+  const headers: Record<string, string> = { "User-Agent": USER_AGENT, Accept: "text/html,application/xhtml+xml" };
+  if (cached?.etag) headers["If-None-Match"] = cached.etag;
+  if (cached?.lastModified) headers["If-Modified-Since"] = cached.lastModified;
   const res = await fetch(u, {
-    headers: { "User-Agent": USER_AGENT, Accept: "text/html,application/xhtml+xml" },
+    headers,
     redirect: "follow",
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     cache: "no-store",
   });
+  if (res.status === 304 && cached) {
+    const page = { ...cached.page, url, retrievedAt: new Date().toISOString() };
+    pageCache.set(key, { ...cached, at: Date.now(), page });
+    return page;
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const finalUrl = res.url || url;
   if (!isSafePublicUrl(finalUrl)) throw new Error("redirected to a non-public address");
   const type = res.headers.get("content-type") ?? "";
   if (!/html|xml/i.test(type)) throw new Error(`not HTML (${type || "unknown type"})`);
   const html = (await res.text()).slice(0, MAX_CHARS);
-  return { url, finalUrl, html, retrievedAt: new Date().toISOString() };
+  const page = { url, finalUrl, html, retrievedAt: new Date().toISOString() };
+  pageCache.set(key, { at: Date.now(), etag: res.headers.get("etag"), lastModified: res.headers.get("last-modified"), page });
+  if (pageCache.size > PAGE_MAX) {
+    const oldest = pageCache.keys().next().value;
+    if (oldest !== undefined) pageCache.delete(oldest);
+  }
+  return page;
 }
 
 /* ---------- Beautiful Soup bridge ---------- */
@@ -138,7 +173,15 @@ function runParser(pages: FetchedPage[]): Promise<ParsedPage[]> {
 export async function inspectUrls(
   urls: string[],
 ): Promise<{ pages: InspectedPage[]; failed: number; parserError: string | null; fetchLog: FetchLogEntry[] }> {
-  const safe = urls.filter(isSafePublicUrl);
+  // One read per distinct page, however many paths or directory entries pointed at it.
+  const seen = new Set<string>();
+  const unique = urls.filter((u) => {
+    const k = normalizeUrl(u);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  const safe = unique.filter(isSafePublicUrl);
   const settled = await pool(
     safe.map((u) => () => fetchPage(u)),
     FETCH_CONCURRENCY,
@@ -148,11 +191,11 @@ export async function inspectUrls(
       ? { url: safe[i], ok: true, error: null }
       : { url: safe[i], ok: false, error: r.reason instanceof Error ? r.reason.message : String(r.reason) },
   );
-  for (const u of urls) {
+  for (const u of unique) {
     if (!safe.includes(u)) fetchLog.push({ url: u, ok: false, error: "not a safe public URL" });
   }
   const fetched = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
-  const failed = urls.length - fetched.length;
+  const failed = unique.length - fetched.length;
   if (fetched.length === 0) return { pages: [], failed, parserError: null, fetchLog };
   try {
     const parsed = await runParser(fetched);

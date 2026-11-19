@@ -1,6 +1,6 @@
 import FormSection from "./FormSection";
 import SuggestionChips from "./SuggestionChips";
-import { STAGE_CODES, STAGE_LABELS, type StageCode } from "@/types/search";
+import { SHOWN_STAGES, STAGE_LABELS, type StageCode } from "@/types/search";
 
 type Props = {
   value: StageCode[];
@@ -16,7 +16,7 @@ export default function CareerStages({ value, onChange }: Props) {
 
   return (
     <FormSection title="career stages"
-      description="enter career stages description">
+      description="also self-explanatory">
       <SuggestionChips
         chips={SUGGESTED.map((s) => ({
           label: STAGE_LABELS[s],
@@ -25,7 +25,7 @@ export default function CareerStages({ value, onChange }: Props) {
         }))}
       />
       <div className="form-checks">
-        {STAGE_CODES.map((stage) => (
+        {SHOWN_STAGES.map((stage) => (
           <label key={stage} className="form-check">
             <input
               type="checkbox"

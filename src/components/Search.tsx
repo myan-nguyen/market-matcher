@@ -41,10 +41,10 @@ export default function Search({ onSearch, loading = false }: Props) {
 
   return (
     <form className="search" onSubmit={handleSubmit}>
-      <p className="main-search-text">hi dan! how this works is you type in a specific field in the main search engine
-        and a few constraints (give me some ideas), and market matcher (TM) will search the web and find you researchers
-        that suit your criteria. i've included some basic filters to get you started based off your Notion, but feel free to
-        add custom ones as well.
+      <p className="main-search-text">hi dan! type in your search criteria below as described and market matcher (TM) will find you relevant researchers
+        accordingly (i've included basic search criteria and results filters to get you started inferenced from your Notion). 
+        linked within each researcher result are its sources, and contact information can be found through there. do note that unfortunately, market matcher is still quite slow in executing searches (results should load within 1 minute), so please be patient and make those queries count! 
+        you can also bookmark candidates and access them through the bookmark toggle on the results sidebar, but beware -- your saved candidates clear when you close the tab (terribly inconvenient i'm aware, apologies)
       </p>
       <div className="form-grid">
         <MainSearch />

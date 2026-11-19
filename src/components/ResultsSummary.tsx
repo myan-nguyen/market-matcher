@@ -5,7 +5,7 @@ export default function ResultsSummary({ response }: { response: SearchResponse 
   return (
     <div className="summary">
       <p className="summary-line">
-        text me if you want more results shown, only showing 50 for now. retrieved {time}
+        text me if you want more results shown, only showing 50 for now. also, a colored star means that piece of evidence has been verified. retrieved {time}
         {response.limitReached}
       </p>
       <details className="summary-plan">

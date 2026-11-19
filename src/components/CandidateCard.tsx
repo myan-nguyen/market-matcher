@@ -1,13 +1,12 @@
-import { Star } from "lucide-react";
+import { Bookmark, Star } from "lucide-react";
 import type { Candidate, ClaimStatus } from "@/types/search";
 import { STAGE_LABELS } from "@/types/search";
 import { stateName } from "@/lib/states";
-import { opportunityStatus } from "@/lib/matching";
 
 type Props = {
   candidate: Candidate;
   saved: boolean;
-  onToggleSave: (id: string) => void;
+  onToggleSave: (c: Candidate) => void;
 };
 
 /** Filled star when the claim is verified, outline otherwise. Sits left of the content. */
@@ -36,7 +35,6 @@ function Linked({ url, children }: { url: string | null; children: React.ReactNo
 
 export default function CandidateCard({ candidate: c, saved, onToggleSave }: Props) {
   const org = c.organizations[0];
-  const opp = opportunityStatus(c);
   const stageText = c.stage.value ? STAGE_LABELS[c.stage.value] : "Unknown";
   const locText = c.location.value ? (stateName(c.location.value) ?? c.location.value) : "Unknown";
 
@@ -55,14 +53,31 @@ export default function CandidateCard({ candidate: c, saved, onToggleSave }: Pro
         </div>
         <button
           type="button"
-          className={saved ? "card-save card-save-on" : "card-save"}
-          onClick={() => onToggleSave(c.id)}
+          className="card-bookmark"
+          onClick={() => onToggleSave(c)}
           aria-pressed={saved}
+          aria-label={saved ? `Remove ${c.name} from bookmarks` : `Bookmark ${c.name}`}
+          title={saved ? "Remove bookmark" : "Bookmark"}
         >
-          {saved ? "Saved" : "Save"}
+          <Bookmark size={20} fill={saved ? "currentColor" : "none"} />
         </button>
       </div>
 
+      <p className="card-line">
+        <span className="card-label">University / institution</span>
+        {c.organizations.length ? (
+          <span className="card-orgs">
+            {c.organizations.slice(0, 3).map((o, i) => (
+              <span className="card-org-item" key={`${o.name}-${i}`}>
+                <Mark status={o.status} />
+                <Linked url={o.source}>{o.name}</Linked>
+              </span>
+            ))}
+          </span>
+        ) : (
+          "Not found"
+        )}
+      </p>
       <p className="card-line">
         <span className="card-label">Stage</span>
         <Mark status={c.stage.status} />
@@ -104,16 +119,22 @@ export default function CandidateCard({ candidate: c, saved, onToggleSave }: Pro
         ))}
       </ul>
       <p className="card-line">
-        <span className="card-label">Opportunity fit</span>
-        {opp === "not checked" ? "Not checked" : opp === "checked" ? "Checked" : "Unresolved"}
+        <span className="card-label">Contact</span>
+        {c.contact?.kind === "email" ? (
+          <>
+            <a href={`mailto:${c.contact.value}`}>Email: {c.contact.value}</a>
+            <a className="card-source" href={c.contact.source} target="_blank" rel="noopener noreferrer">
+              published here · checked {c.contact.checkedAt.slice(0, 10)}
+            </a>
+          </>
+        ) : c.contact?.kind === "page" ? (
+          <a href={c.contact.value} target="_blank" rel="noopener noreferrer">
+            Contact page
+          </a>
+        ) : (
+          "No verified contact found"
+        )}
       </p>
-      {c.unresolvedQuestions.length > 0 && (
-        <ul className="card-questions">
-          {c.unresolvedQuestions.map((q) => (
-            <li key={q}>{q}</li>
-          ))}
-        </ul>
-      )}
     </article>
   );
 }

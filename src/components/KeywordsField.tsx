@@ -3,7 +3,7 @@ import FormSection from "./FormSection";
 export default function KeywordsField() {
   return (
     <FormSection title="custom keywords"
-      description="enter keywords description">
+      description="enter keywords that must be included, excluded, or heavily preferred... you get the gist">
       <input
         className="form-input"
         name="include"

@@ -44,7 +44,7 @@
   color: #0047ab;
   width: 75%;
   text-align: left;
-  padding: 0 0 0 0;
+  font-weight: semi-bold;
 }
 
 /* FORMS CSS */
@@ -121,14 +121,13 @@
   font-family: inherit;
   font-size: 1.1rem;
   font-weight: 700;
-  color: #fff;
-  background: #0047ab;
-  border: none;
+  color: #00204e;
+  border: #00204e;
   cursor: pointer;
 }
 
 .search-button:hover {
-  background: #00204e;
+  border: #e5e7eb;
 }
 
 
@@ -274,6 +273,26 @@
   color: #00204e;
 }
 
+/* Star + institution pairs on one line: star tight to its name, a gap between pairs. */
+.card-orgs {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 14px;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.card-org-item {
+  display: inline-flex;
+  align-items: center;
+}
+
+.card-org-item .card-star {
+  margin-right: 4px !important;
+  vertical-align: middle !important;
+}
+
 .card-evidence {
   margin: 0;
   padding-left: 18px;
@@ -320,6 +339,41 @@
 }
 
 .card-save-on {
+  color: #fff;
+  background: #0047ab;
+}
+
+.card-bookmark {
+  align-self: flex-start;
+  padding: 4px;
+  color: #0047ab;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.card-bookmark:hover {
+  color: #00204e;
+}
+
+.bookmark-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #0047ab;
+  background: transparent;
+  border: 2px solid #0047ab;
+  cursor: pointer;
+}
+
+.bookmark-toggle-on {
   color: #fff;
   background: #0047ab;
 }

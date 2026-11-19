@@ -4,7 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import type { Candidate, ResultFilters, SearchRequest } from "@/types/search";
 import { DEFAULT_FILTERS } from "@/types/search";
-import { classify, hasConstraints, newestEvidence, opportunityStatus } from "@/lib/matching";
+import { classify, newestEvidence } from "@/lib/matching";
+import { useBookmarks } from "@/lib/bookmarks";
 import CandidateCard from "./CandidateCard";
 import Pagination from "./Pagination";
 import ResultControls from "./ResultControls";
@@ -17,30 +18,14 @@ type Props = {
 };
 
 export default function ResultsPanel({ candidates, request }: Props) {
-  const constrained = hasConstraints(request);
   const [filters, setFilters] = useState<ResultFilters>(DEFAULT_FILTERS);
   const [page, setPage] = useState(1);
-  const [saved, setSaved] = useState<Set<string>>(new Set());
+  const bookmarks = useBookmarks();
+  const [showBookmarks, setShowBookmarks] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Verified contradictions drop out. Everything else is grouped.
-  const grouped = useMemo(() => {
-    const verified: Candidate[] = [];
-    const checking: Candidate[] = [];
-    for (const c of candidates) {
-      const g = classify(c, request);
-      if (g === "verified") verified.push(c);
-      else if (g === "needs-checking") checking.push(c);
-    }
-    return { verified, checking };
-  }, [candidates, request]);
-
-  // Without constraints there is nothing to verify, so show everyone together.
-  const pool = constrained
-    ? filters.group === "verified"
-      ? grouped.verified
-      : grouped.checking
-    : candidates;
+  // Everyone is shown together. Verified contradictions were already removed on the server.
+  const pool = useMemo(() => candidates.filter((c) => classify(c, request) !== "excluded"), [candidates, request]);
 
   const institutions = useMemo(
     () =>
@@ -53,44 +38,36 @@ export default function ResultsPanel({ candidates, request }: Props) {
   const visible = useMemo(() => {
     const list = pool.filter(
       (c) =>
-        (filters.stageStatus === "all" ||
-          c.stage.status === filters.stageStatus ||
-          c.location.status === filters.stageStatus) &&
         (filters.stage === "all" || (c.stage.value ?? "unknown") === filters.stage) &&
         (filters.institution === "all" ||
-          c.organizations.some((o) => o.name === filters.institution)) &&
-        (filters.evidenceType === "all" ||
-          c.evidence.some((e) => e.type === filters.evidenceType)) &&
-        (filters.opportunity === "all" || opportunityStatus(c) === filters.opportunity),
+          c.organizations.some((o) => o.name === filters.institution)),
     );
     return list.sort((a, b) => {
       if (filters.sort === "name") return a.name.localeCompare(b.name);
       if (filters.sort === "newest")
         return newestEvidence(b) - newestEvidence(a) || b.score - a.score;
-      return b.score - a.score;
+      return 0; // "strongest": keep the server order, which is relevance diversified across organizations
     });
   }, [pool, filters]);
 
-  const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  // Bookmarked view: only saved people, newest first, including ones from earlier searches this session.
+  const shownList = showBookmarks ? bookmarks.items.map((b) => b.candidate) : visible;
+  const totalPages = Math.max(1, Math.ceil(shownList.length / PAGE_SIZE));
   const current = Math.min(page, totalPages);
-  const pageItems = visible.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
+  const pageItems = shownList.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-  }, [current]);
+  }, [current, showBookmarks]);
 
   function updateFilters(next: Partial<ResultFilters>) {
     setFilters((f) => ({ ...f, ...next }));
     setPage(1);
   }
 
-  function toggleSave(id: string) {
-    setSaved((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  function toggleBookmarkView() {
+    setShowBookmarks((v) => !v);
+    setPage(1);
   }
 
   return (
@@ -100,27 +77,30 @@ export default function ResultsPanel({ candidates, request }: Props) {
         institutions={institutions}
         shown={visible.length}
         total={pool.length}
-        constrained={constrained}
-        verifiedCount={grouped.verified.length}
-        checkingCount={grouped.checking.length}
         onChange={updateFilters}
+        bookmarkCount={bookmarks.items.length}
+        showBookmarks={showBookmarks}
+        onToggleBookmarks={toggleBookmarkView}
       />
       <div className="results-scroll" ref={scrollRef}>
         {pageItems.length === 0 ? (
-          <p className="results-empty">No candidates match these result controls.</p>
+          <p className="results-empty">
+            {showBookmarks ? "No bookmarked researchers yet. Click the bookmark icon on a card to save it." : "No candidates match these result controls."}
+          </p>
         ) : (
           <div className="results-list">
             {pageItems.map((c, i) => (
               <motion.div
-                key={c.id}
+                key={`${showBookmarks ? "b" : "r"}-${c.id}`}
+                layout
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.3, delay: i * 0.03 }}
               >
                 <CandidateCard
                   candidate={c}
-                  saved={saved.has(c.id)}
-                  onToggleSave={toggleSave}
+                  saved={bookmarks.has(c)}
+                  onToggleSave={bookmarks.toggle}
                 />
               </motion.div>
             ))}

@@ -90,7 +90,15 @@ function merge(primary: Candidate, other: Candidate): Candidate {
     foundBy: [...new Set([...primary.foundBy, ...other.foundBy])],
     excerpts: uniq([...(primary.excerpts ?? []), ...(other.excerpts ?? [])], (x) => x.url + x.text),
     score: Math.max(primary.score, other.score) + 3,
+    contact: bestContact(primary.contact, other.contact),
   };
+}
+
+const CONTACT_RANK = { email: 2, page: 1, none: 0 } as const;
+function bestContact(a: Candidate["contact"], b: Candidate["contact"]): Candidate["contact"] {
+  if (!a) return b;
+  if (!b) return a;
+  return CONTACT_RANK[b.kind] > CONTACT_RANK[a.kind] ? b : a;
 }
 
 export type ResolveResult = { people: Candidate[]; merged: number; similar: number };

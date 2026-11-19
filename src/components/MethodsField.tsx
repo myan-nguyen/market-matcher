@@ -3,11 +3,11 @@ import FormSection from "./FormSection";
 export default function MethodsField() {
   return (
     <FormSection title="research methods"
-      description="enter methods description">
+      description="declare any particular research methods a resulting profile should be correlated with">
       <input
         className="form-input"
         name="method"
-        placeholder="enter something"
+        placeholder="ex: just-in-time adaptive intervention/JITAI"
       />
     </FormSection>
   );
