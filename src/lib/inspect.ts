@@ -144,17 +144,59 @@ function pythonBin(): string {
  * On Vercel the Node runtime has no Python, so pages go to the Python function at
  * /api/parse (api/parse.py), which runs the same parser. Locally Python is spawned.
  */
+// Vercel rejects request bodies over 4.5 MB (FUNCTION_PAYLOAD_TOO_LARGE), so pages are
+// sent in batches under ~3 MB, and a single huge page is trimmed (profile facts sit near the top).
+const REMOTE_BATCH_BYTES = 1_500_000;
+const REMOTE_PAGE_CHARS = 400_000;
+
 async function runRemoteParser(pages: FetchedPage[]): Promise<ParsedPage[]> {
   const host = process.env.PARSER_URL ?? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL ?? process.env.VERCEL_URL}`;
   const base = host.replace(/\/$/, "");
-  const res = await fetch(`${base}/api/parse`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-parser-secret": process.env.PARSER_SECRET ?? "" },
-    body: JSON.stringify(pages.map((p) => ({ url: p.finalUrl, html: p.html }))),
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!res.ok) throw new Error(`remote parser HTTP ${res.status}`);
-  return (await res.json()) as ParsedPage[];
+  const items = pages.map((p) => ({ url: p.finalUrl, html: p.html.slice(0, REMOTE_PAGE_CHARS) }));
+
+  const batches: (typeof items)[] = [];
+  let cur: typeof items = [];
+  let size = 0;
+  for (const it of items) {
+    const n = Buffer.byteLength(it.html) + it.url.length + 50;
+    if (cur.length && size + n > REMOTE_BATCH_BYTES) {
+      batches.push(cur);
+      cur = [];
+      size = 0;
+    }
+    cur.push(it);
+    size += n;
+  }
+  if (cur.length) batches.push(cur);
+
+  const send = async (batch: typeof items): Promise<ParsedPage[]> => {
+    const res = await fetch(`${base}/api/parse`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-parser-secret": process.env.PARSER_SECRET ?? "" },
+      body: JSON.stringify(batch),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!res.ok) throw new Error(`remote parser HTTP ${res.status}`);
+    return (await res.json()) as ParsedPage[];
+  };
+  // On a size/timeout failure, split the batch in half and retry; a single failing page becomes an error entry.
+  const post = async (batch: typeof items): Promise<ParsedPage[]> => {
+    try {
+      return await send(batch);
+    } catch (e) {
+      if (batch.length > 1) {
+        const mid = Math.ceil(batch.length / 2);
+        const [a, b] = await Promise.all([post(batch.slice(0, mid)), post(batch.slice(mid))]);
+        return [...a, ...b];
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      return [{ url: batch[0].url, kind: "error", error: msg }];
+    }
+  };
+  // A few batches at a time; order is kept so results line up with the input pages.
+  const out: ParsedPage[][] = [];
+  for (let i = 0; i < batches.length; i += 3) out.push(...(await Promise.all(batches.slice(i, i + 3).map(post))));
+  return out.flat();
 }
 
 function runParser(pages: FetchedPage[]): Promise<ParsedPage[]> {

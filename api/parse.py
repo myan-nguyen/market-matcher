@@ -4,6 +4,7 @@ The Next.js runtime on Vercel has no Python, so inspect.ts posts pages here.
 POST /api/parse  body: [{"url": ..., "html": ...}]  ->  parsed pages (JSON).
 A shared secret keeps the endpoint from being used by anyone else.
 """
+import gzip
 import json
 import os
 import sys
@@ -32,9 +33,12 @@ class handler(BaseHTTPRequestHandler):
         self._send(200, out)
 
     def _send(self, status, body):
-        data = json.dumps(body).encode()
+        data = json.dumps(body, separators=(",", ":")).encode()
         self.send_response(status)
         self.send_header("content-type", "application/json")
+        if len(data) > 1024 and "gzip" in (self.headers.get("accept-encoding") or ""):
+            data = gzip.compress(data)
+            self.send_header("content-encoding", "gzip")
         self.send_header("content-length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

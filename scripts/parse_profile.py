@@ -244,7 +244,7 @@ def collect_links(main, base_url):
             if u.startswith("http") and u != url and u != base_url and u not in others:
                 others.append(u)
         context = squash(entry.get_text(" "))[:300]
-        out[name] = {"name": name, "url": url, "context": context, "others": others[:4]}
+        out[name] = {"name": name, "url": url, "context": context, "others": others[:2]}
     return list(out.values())
 
 
