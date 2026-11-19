@@ -1,0 +1,166 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { hostOf, isSafePublicUrl } from "@/lib/leads";
+import { pool } from "@/lib/pool";
+
+const USER_AGENT = "MarketMatcher/0.1 (research outreach tool; reads selected public profile pages)";
+const FETCH_TIMEOUT_MS = 10000;
+const MAX_CHARS = 1_500_000;
+const FETCH_CONCURRENCY = 6;
+
+export type StageHit = {
+  kind: "postdoc" | "phd-candidate" | "phd-student" | "faculty";
+  text: string;
+  where: "jobTitle" | "h1" | "title" | "body";
+};
+
+/** One person's entry on a directory page: profile link, listed text, and other links such as a personal site. */
+export type DirectoryLink = { name: string; url: string; context: string; others: string[] };
+
+export type ParsedPage = {
+  url: string;
+  kind: "person" | "directory" | "other" | "error";
+  name?: string | null;
+  orgs?: string[];
+  headline?: string;
+  stage_hits?: StageHit[];
+  states?: string[];
+  focus?: string | null;
+  links?: DirectoryLink[]; // individual profile links, set for directory pages
+  error?: string;
+};
+
+export type FetchLogEntry = { url: string; ok: boolean; error: string | null };
+
+export type FetchedPage = { url: string; finalUrl: string; html: string; retrievedAt: string };
+export type InspectedPage = { fetched: FetchedPage; parsed: ParsedPage };
+
+/* ---------- robots.txt (minimal: honors Disallow for User-agent: *) ---------- */
+
+const robotsCache = new Map<string, Promise<string[]>>();
+
+async function loadDisallows(origin: string): Promise<string[]> {
+  try {
+    const res = await fetch(`${origin}/robots.txt`, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return [];
+    const rules: string[] = [];
+    let applies = false;
+    let lastWasAgent = false;
+    for (const raw of (await res.text()).split(/\r?\n/)) {
+      const line = raw.split("#")[0].trim();
+      const m = /^([a-z-]+)\s*:\s*(.*)$/i.exec(line);
+      if (!m) continue;
+      const key = m[1].toLowerCase();
+      if (key === "user-agent") {
+        applies = lastWasAgent ? applies || m[2] === "*" : m[2] === "*";
+        lastWasAgent = true;
+      } else {
+        lastWasAgent = false;
+        if (key === "disallow" && applies && m[2]) rules.push(m[2]);
+      }
+    }
+    return rules;
+  } catch {
+    return []; // an unreachable robots.txt is treated as no restrictions
+  }
+}
+
+async function robotsAllows(u: URL): Promise<boolean> {
+  const cached = robotsCache.get(u.origin) ?? loadDisallows(u.origin);
+  robotsCache.set(u.origin, cached);
+  const rules = await cached;
+  const target = u.pathname + u.search;
+  return !rules.some((r) => target.startsWith(r.replace(/\*$/, "")));
+}
+
+/* ---------- fetching ---------- */
+
+export async function fetchPage(url: string): Promise<FetchedPage> {
+  const u = new URL(url);
+  if (!(await robotsAllows(u))) throw new Error("blocked by robots.txt");
+  const res = await fetch(u, {
+    headers: { "User-Agent": USER_AGENT, Accept: "text/html,application/xhtml+xml" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const finalUrl = res.url || url;
+  if (!isSafePublicUrl(finalUrl)) throw new Error("redirected to a non-public address");
+  const type = res.headers.get("content-type") ?? "";
+  if (!/html|xml/i.test(type)) throw new Error(`not HTML (${type || "unknown type"})`);
+  const html = (await res.text()).slice(0, MAX_CHARS);
+  return { url, finalUrl, html, retrievedAt: new Date().toISOString() };
+}
+
+/* ---------- Beautiful Soup bridge ---------- */
+
+function pythonBin(): string {
+  if (process.env.PYTHON_BIN) return process.env.PYTHON_BIN;
+  const venv = path.join(process.cwd(), ".venv", "bin", "python");
+  return existsSync(venv) ? venv : "python3";
+}
+
+function runParser(pages: FetchedPage[]): Promise<ParsedPage[]> {
+  return new Promise((resolve, reject) => {
+    const script = path.join(process.cwd(), "scripts", "parse_profile.py");
+    const child = spawn(pythonBin(), [script], { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("parser timed out"));
+    }, 30000);
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(new Error(`could not start Python parser: ${e.message}`));
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(`parser exited ${code}: ${err.slice(0, 200)}`));
+      try {
+        resolve(JSON.parse(out) as ParsedPage[]);
+      } catch {
+        reject(new Error("parser returned invalid JSON"));
+      }
+    });
+    child.stdin.end(JSON.stringify(pages.map((p) => ({ url: p.finalUrl, html: p.html }))));
+  });
+}
+
+/** Fetches public pages politely, then parses them with Beautiful Soup. */
+export async function inspectUrls(
+  urls: string[],
+): Promise<{ pages: InspectedPage[]; failed: number; parserError: string | null; fetchLog: FetchLogEntry[] }> {
+  const safe = urls.filter(isSafePublicUrl);
+  const settled = await pool(
+    safe.map((u) => () => fetchPage(u)),
+    FETCH_CONCURRENCY,
+  );
+  const fetchLog: FetchLogEntry[] = settled.map((r, i) =>
+    r.status === "fulfilled"
+      ? { url: safe[i], ok: true, error: null }
+      : { url: safe[i], ok: false, error: r.reason instanceof Error ? r.reason.message : String(r.reason) },
+  );
+  for (const u of urls) {
+    if (!safe.includes(u)) fetchLog.push({ url: u, ok: false, error: "not a safe public URL" });
+  }
+  const fetched = settled.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+  const failed = urls.length - fetched.length;
+  if (fetched.length === 0) return { pages: [], failed, parserError: null, fetchLog };
+  try {
+    const parsed = await runParser(fetched);
+    const pages = fetched.map((f, i) => ({ fetched: f, parsed: parsed[i] }));
+    return { pages, failed, parserError: null, fetchLog };
+  } catch (e) {
+    return { pages: [], failed, parserError: e instanceof Error ? e.message : String(e), fetchLog };
+  }
+}
+
+export const pageHost = (p: InspectedPage) => hostOf(p.fetched.finalUrl);
